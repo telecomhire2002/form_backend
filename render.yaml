@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: telecom-hire-fastapi
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        sync: false
+      - key: MONGO_COLLECTION
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

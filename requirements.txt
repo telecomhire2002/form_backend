@@ -1,0 +1,6 @@
+fastapi>=0.111,<0.112
+uvicorn[standard]>=0.30,<0.31
+motor>=3.6,<4
+pymongo>=4.7,<5
+python-dotenv>=1.0,<2
+pydantic>=2.8,<3

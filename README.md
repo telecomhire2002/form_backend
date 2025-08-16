@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # form_backend
 
 
@@ -91,3 +92,42 @@ For open source projects, say how it is licensed.
 
 ## Project status
 If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+=======
+# Telecom Hire — FastAPI Backend
+
+## Local dev
+```bash
+cd fastapi-backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env .env.local && edit it (or edit .env directly)
+uvicorn main:app --reload
+```
+
+Set in `.env`:
+```
+MONGO_URI=mongodb://admin:changeme123@localhost:27017/?authSource=admin
+MONGO_DB=telecom_hire
+MONGO_COLLECTION=applications
+ALLOWED_ORIGINS=http://localhost:8888,http://localhost:5173,https://your-netlify-site.netlify.app
+```
+
+Test:
+```
+curl -s http://localhost:8000/health
+curl -s -X POST http://localhost:8000/submit -H 'Content-Type: application/json' -d '{ "email_primary":"a@b.com", "circle":"Karnataka","state":"KARNATAKA","district":"BLR","name":"Test","contact_number":"+91 99999 99999","pin_code":"560001","designation":"Tech","activity":"LOS SURVEY","work_at_height_certificate":"YES","ppes":"YES" }'
+```
+
+## Deploy on Render (free)
+- Push `fastapi-backend` as a repo, connect to Render as a Web Service.
+- Set env vars from `.env` in Render dashboard.
+- After deploy, you’ll get a URL like `https://telecom-hire-fastapi.onrender.com`
+
+## Netlify Frontend
+- Deploy the `/frontend` folder to Netlify.
+- In `frontend/config.js`, set:
+  ```js
+  window.API_BASE = "https://telecom-hire-fastapi.onrender.com";
+  ```
+- The frontend will POST to `API_BASE + "/submit"`.
+>>>>>>> 4bce9bc (initial commit)
