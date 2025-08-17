@@ -1,7 +1,6 @@
 import os
-from typing import Optional, Annotated, List
 from datetime import datetime
-from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,30 +11,14 @@ from pymongo.errors import DuplicateKeyError
 
 load_dotenv()
 
+# --- Env ---
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
-client: Optional[AsyncIOMotorClient] = None
-collection = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global client, collection
-    if not MONGO_URI or not MONGO_DB or not MONGO_COLLECTION:
-        raise RuntimeError("Missing MONGO_URI/MONGO_DB/MONGO_COLLECTION env vars")
-    client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db = client[MONGO_DB]
-    collection = db[MONGO_COLLECTION]
-    # Optional: ping once to fail fast if network blocked
-    await db.command("ping")
-    # Optional: ensure index if you want uniqueness on primary email
-    await collection.create_index("email_primary", unique=True)
-    yield
-    # Do not close client to allow instance reuse on Vercel
-
-app = FastAPI(title="Telecom Hire Backend (FastAPI)", root_path="/api", lifespan=lifespan)
+# --- FastAPI app (note root_path for Vercel /api rewrite) ---
+app = FastAPI(title="Telecom Hire Backend (FastAPI)", root_path="/api")
 
 if ALLOWED_ORIGINS:
     app.add_middleware(
@@ -46,9 +29,44 @@ if ALLOWED_ORIGINS:
         allow_headers=["*"],
     )
 
+# --- Mongo (lazy init for serverless) ---
+_client: Optional[AsyncIOMotorClient] = None
+_db = None
+_col = None
+
+async def get_collection():
+    """ Lazily initialize and cache the Mongo collection. """
+    global _client, _db, _col
+
+    if _col is not None:
+        return _col
+
+    if not MONGO_URI or not MONGO_DB or not MONGO_COLLECTION:
+        raise HTTPException(status_code=500, detail="Missing Mongo env vars")
+
+    try:
+        _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        _db = _client[MONGO_DB]
+        _col = _db[MONGO_COLLECTION]
+        # verify connectivity
+        await _db.command("ping")
+        # optional but recommended if you want unique primary email
+        try:
+            await _col.create_index("email_primary", unique=True)
+        except Exception:
+            # index might already exist; ignore
+            pass
+        return _col
+    except Exception as e:
+        # reset so we can retry next request
+        _client = None
+        _db = None
+        _col = None
+        raise HTTPException(status_code=500, detail=f"Mongo init failed: {e}")
+
+# --- Models ---
 class Submission(BaseModel):
     email_primary: EmailStr
-    email_alt: Optional[EmailStr] = None
     circle: str = Field(..., min_length=1)
     state: str = Field(..., min_length=1)
     district: str = Field(..., min_length=1)
@@ -61,17 +79,15 @@ class Submission(BaseModel):
     ppes: str
     submitted_at: Optional[datetime] = None
 
-async def get_collection():
-    if collection is None:
-        raise HTTPException(status_code=503, detail="DB not initialized")
-    return collection
-
+# --- Routes ---
 @app.get("/health")
 async def health():
+    """Basic health check + Mongo connectivity status."""
+    if not MONGO_URI or not MONGO_DB:
+        return {"ok": True, "mongo": "not-configured"}
     try:
-        if not MONGO_URI:
-            return {"ok": True, "mongo": "not-configured"}
-        c = AsyncIOMotorClient(MONGO_URI)
+        # ping with a fresh lightweight client so this works even before lazy init
+        c = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=3000)
         await c.admin.command("ping")
         return {"ok": True, "mongo": "ok"}
     except Exception as e:
@@ -79,6 +95,7 @@ async def health():
 
 @app.get("/debug")
 async def debug(col=Depends(get_collection)):
+    """Return up to 10 docs (no _id) for quick inspection."""
     docs = []
     async for d in col.find({}, {"_id": False}).limit(10):
         docs.append(d)
@@ -88,8 +105,6 @@ async def debug(col=Depends(get_collection)):
 async def submit(data: Submission, col=Depends(get_collection)):
     doc = data.model_dump()
     doc["email_primary"] = doc["email_primary"].lower()
-    if doc.get("email_alt"):
-        doc["email_alt"] = doc["email_alt"].lower()
     doc["submitted_at"] = datetime.utcnow()
 
     try:
@@ -98,4 +113,4 @@ async def submit(data: Submission, col=Depends(get_collection)):
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="email_primary already exists")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {e}") from e
+        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
