@@ -1,8 +1,9 @@
 import os
-from typing import Optional
+from typing import Optional, Annotated, List
 from datetime import datetime
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -14,123 +15,87 @@ load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "")
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()] or ["*"]
-ALLOWED_ORIGINS = ["*"]
-
-app = FastAPI(title="Telecom Hire Backend (FastAPI)", root_path="/api")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
 client: Optional[AsyncIOMotorClient] = None
 collection = None
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global client, collection
+    if not MONGO_URI or not MONGO_DB or not MONGO_COLLECTION:
+        raise RuntimeError("Missing MONGO_URI/MONGO_DB/MONGO_COLLECTION env vars")
+    client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    db = client[MONGO_DB]
+    collection = db[MONGO_COLLECTION]
+    # Optional: ping once to fail fast if network blocked
+    await db.command("ping")
+    # Optional: ensure index if you want uniqueness on primary email
+    await collection.create_index("email_primary", unique=True)
+    yield
+    # Do not close client to allow instance reuse on Vercel
+
+app = FastAPI(title="Telecom Hire Backend (FastAPI)", root_path="/api", lifespan=lifespan)
+
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 class Submission(BaseModel):
     email_primary: EmailStr
-    email_alt: Optional[str] = ""
+    email_alt: Optional[EmailStr] = None
     circle: str = Field(..., min_length=1)
     state: str = Field(..., min_length=1)
     district: str = Field(..., min_length=1)
     name: str = Field(..., min_length=2)
-    contact_number: str = Field(..., min_length=7)  # frontend enforces detailed pattern
-    pin_code: str = Field(..., pattern=r"^\d{6}$")
-    designation: str = Field(..., min_length=1)
-    activity: str = Field(..., min_length=1)
-    work_at_height_certificate: str = Field(..., pattern=r"^(YES|NO)$")
-    ppes: str = Field(..., pattern=r"^(YES|NO)$")
-    farm_tocli_number: Optional[str] = ""
-    jbth_certificate_number: Optional[str] = ""
+    contact_number: str = Field(..., min_length=7, max_length=20)
+    pin_code: str = Field(..., min_length=3, max_length=12)
+    designation: str
+    activity: str
+    work_at_height_certificate: str
+    ppes: str
+    submitted_at: Optional[datetime] = None
 
-@app.on_event("startup")
-async def on_startup():
-    global client, collection
-    if not MONGO_URI or not MONGO_DB or not MONGO_COLLECTION:
-        return
-    client = AsyncIOMotorClient(MONGO_URI, maxPoolSize=5)
-    db = client[MONGO_DB]
-    collection = db[MONGO_COLLECTION]
-
-    # Ensure ONLY primary email is unique
-    await collection.create_index(
-        "email_primary_lower",
-        unique=True,
-        sparse=True,
-        name="uniq_email_primary_lower",
-    )
-
-    # Make alt email NON-unique (optional)
-    try:
-        await collection.drop_index("uniq_email_alt_lower")
-    except Exception:
-        pass
-    await collection.create_index(
-        "email_alt_lower",
-        unique=False,
-        sparse=True,
-        name="idx_email_alt_lower",
-    )
-
-    # Add a regular index on pin_code for faster lookups
-    await collection.create_index(
-        "pin_code",
-        unique=False,
-        sparse=True,  # skips indexing if field is missing
-        name="idx_pin_code",
-    )
-
+async def get_collection():
+    if collection is None:
+        raise HTTPException(status_code=503, detail="DB not initialized")
+    return collection
 
 @app.get("/health")
 async def health():
-    if not MONGO_URI or not MONGO_DB:
-        return {"status": "ok", "mongo": "not-configured"}
     try:
+        if not MONGO_URI:
+            return {"ok": True, "mongo": "not-configured"}
         c = AsyncIOMotorClient(MONGO_URI)
         await c.admin.command("ping")
-        c.close()
-        return {"status": "ok", "mongo": "connected"}
+        return {"ok": True, "mongo": "ok"}
     except Exception as e:
-        return {"status": "error", "mongo": str(e)}
+        return {"ok": False, "mongo": f"error: {e.__class__.__name__}"}
 
 @app.get("/debug")
-async def debug():
-    if collection is None:
-        raise HTTPException(status_code=503, detail="DB not initialized")
-    docs_cursor = collection.find(
-        {}, projection={"_id": False, "email_primary": True, "submittedAt": True}
-    ).sort("submittedAt", -1).limit(5)
-    recent = [d async for d in docs_cursor]
-    total = await collection.count_documents({})
-    return {"count": total, "recent": recent}
+async def debug(col=Depends(get_collection)):
+    docs = []
+    async for d in col.find({}, {"_id": False}).limit(10):
+        docs.append(d)
+    return {"count": len(docs), "docs": docs}
 
 @app.post("/submit")
-async def submit(data: Submission):
-    if collection is None:
-        raise HTTPException(status_code=500, detail="MongoDB connection is not fully configured.")
-    e1 = data.email_primary.lower()
-    e2 = data.email_alt.lower() if data.email_alt else None
-
-    # Friendly 409 if duplicate
-    or_clauses = [{"email_primary_lower": e1}, {"email_alt_lower": e1}]
-    if e2:
-        or_clauses += [{"email_primary_lower": e2}, {"email_alt_lower": e2}]
-    existing = await collection.find_one({"$or": or_clauses})
-    if existing:
-        raise HTTPException(status_code=409, detail="Duplicate submission detected for this email.")
-
+async def submit(data: Submission, col=Depends(get_collection)):
     doc = data.model_dump()
-    doc["email_primary_lower"] = e1
-    doc["email_alt_lower"] = e2
-    doc["submittedAt"] = datetime.utcnow().isoformat()
+    doc["email_primary"] = doc["email_primary"].lower()
+    if doc.get("email_alt"):
+        doc["email_alt"] = doc["email_alt"].lower()
+    doc["submitted_at"] = datetime.utcnow()
 
     try:
-        result = await collection.insert_one(doc)
-        return {"ok": True, "id": str(result.inserted_id)}
+        res = await col.insert_one(doc)
+        return {"ok": True, "id": str(res.inserted_id)}
     except DuplicateKeyError:
-        raise HTTPException(status_code=409, detail="Duplicate submission detected for this email.")
+        raise HTTPException(status_code=409, detail="email_primary already exists")
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error: " + str(e))
+        raise HTTPException(status_code=500, detail=f"Internal server error: {e}") from e
