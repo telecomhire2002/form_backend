@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from typing import Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,40 +30,37 @@ if ALLOWED_ORIGINS:
         allow_headers=["*"],
     )
 
-# --- Mongo (lazy init for serverless) ---
-_client: Optional[AsyncIOMotorClient] = None
-_db = None
-_col = None
-
-async def get_collection():
-    """ Lazily initialize and cache the Mongo collection. """
-    global _client, _db, _col
-
-    if _col is not None:
-        return _col
-
+# --- Mongo dependency: create/close client per request (avoids "event loop is closed") ---
+@asynccontextmanager
+async def mongo_collection():
     if not MONGO_URI or not MONGO_DB or not MONGO_COLLECTION:
         raise HTTPException(status_code=500, detail="Missing Mongo env vars")
 
+    client = AsyncIOMotorClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=20000,
+        connectTimeoutMS=20000,
+        socketTimeoutMS=20000,
+        tls=True,
+        tlsAllowInvalidCertificates=False,
+    )
     try:
-        _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        _db = _client[MONGO_DB]
-        _col = _db[MONGO_COLLECTION]
-        # verify connectivity
-        await _db.command("ping")
-        # optional but recommended if you want unique primary email
+        db = client[MONGO_DB]
+        col = db[MONGO_COLLECTION]
+        # verify connectivity; fail fast if blocked
+        await db.command("ping")
+        # optional index (ignore if already exists)
         try:
-            await _col.create_index("email_primary", unique=True)
+            await col.create_index("email_primary", unique=True)
         except Exception:
-            # index might already exist; ignore
             pass
-        return _col
-    except Exception as e:
-        # reset so we can retry next request
-        _client = None
-        _db = None
-        _col = None
-        raise HTTPException(status_code=500, detail=f"Mongo init failed: {e}")
+        yield col
+    finally:
+        client.close()  # important on serverless to avoid stale loop reuse
+
+# alias to use in Depends
+def get_collection():
+    return mongo_collection()
 
 # --- Models ---
 class Submission(BaseModel):
@@ -82,20 +80,20 @@ class Submission(BaseModel):
 # --- Routes ---
 @app.get("/health")
 async def health():
-    """Basic health check + Mongo connectivity status."""
     if not MONGO_URI or not MONGO_DB:
         return {"ok": True, "mongo": "not-configured"}
+    # use a short-lived client so we don't rely on any cached state
+    client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000, tls=True)
     try:
-        # ping with a fresh lightweight client so this works even before lazy init
-        c = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        await c.admin.command("ping")
+        await client.admin.command("ping")
         return {"ok": True, "mongo": "ok"}
     except Exception as e:
         return {"ok": False, "mongo": f"error: {e.__class__.__name__}"}
+    finally:
+        client.close()
 
 @app.get("/debug")
 async def debug(col=Depends(get_collection)):
-    """Return up to 10 docs (no _id) for quick inspection."""
     docs = []
     async for d in col.find({}, {"_id": False}).limit(10):
         docs.append(d)
@@ -113,4 +111,4 @@ async def submit(data: Submission, col=Depends(get_collection)):
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="email_primary already exists")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {e}" )
