@@ -17,7 +17,7 @@ MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()] or ["*"]
 ALLOWED_ORIGINS = ["*"]
 
-app = FastAPI(title="Telecom Hire Backend (FastAPI)")
+app = FastAPI(title="Telecom Hire Backend (FastAPI)", root_path="/api")
 
 app.add_middleware(
     CORSMiddleware,
