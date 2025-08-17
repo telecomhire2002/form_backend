@@ -1,7 +1,6 @@
 import os
 from datetime import datetime
-from typing import Optional
-from contextlib import asynccontextmanager
+from typing import Optional, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +17,7 @@ MONGO_DB = os.getenv("MONGO_DB", "")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
-# --- FastAPI app (note root_path for Vercel /api rewrite) ---
+# --- FastAPI app (routes mounted under /api/* via vercel.json) ---
 app = FastAPI(title="Telecom Hire Backend (FastAPI)", root_path="/api")
 
 if ALLOWED_ORIGINS:
@@ -30,9 +29,8 @@ if ALLOWED_ORIGINS:
         allow_headers=["*"],
     )
 
-# --- Mongo dependency: create/close client per request (avoids "event loop is closed") ---
-@asynccontextmanager
-async def mongo_collection():
+# --- Request-scoped Mongo dependency (yield) ---
+async def get_collection() -> AsyncGenerator:
     if not MONGO_URI or not MONGO_DB or not MONGO_COLLECTION:
         raise HTTPException(status_code=500, detail="Missing Mongo env vars")
 
@@ -47,20 +45,16 @@ async def mongo_collection():
     try:
         db = client[MONGO_DB]
         col = db[MONGO_COLLECTION]
-        # verify connectivity; fail fast if blocked
+        # Verify connectivity; fail fast if blocked
         await db.command("ping")
-        # optional index (ignore if already exists)
+        # Optional unique index on primary email
         try:
             await col.create_index("email_primary", unique=True)
         except Exception:
             pass
         yield col
     finally:
-        client.close()  # important on serverless to avoid stale loop reuse
-
-# alias to use in Depends
-def get_collection():
-    return mongo_collection()
+        client.close()
 
 # --- Models ---
 class Submission(BaseModel):
@@ -82,7 +76,6 @@ class Submission(BaseModel):
 async def health():
     if not MONGO_URI or not MONGO_DB:
         return {"ok": True, "mongo": "not-configured"}
-    # use a short-lived client so we don't rely on any cached state
     client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000, tls=True)
     try:
         await client.admin.command("ping")
