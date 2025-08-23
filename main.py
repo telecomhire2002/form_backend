@@ -59,15 +59,19 @@ async def get_collection() -> AsyncGenerator:
 # --- Models ---
 class Submission(BaseModel):
     email_primary: EmailStr
+    email_alt: Optional[EmailStr] = None   # new
     circle: str = Field(..., min_length=1)
     state: str = Field(..., min_length=1)
     district: str = Field(..., min_length=1)
+    education_qualification: Optional[str] = None  # new
     name: str = Field(..., min_length=2)
     contact_number: str = Field(..., min_length=7, max_length=20)
     pin_code: str = Field(..., min_length=3, max_length=12)
     designation: str
     activity: str
     work_at_height_certificate: str
+    jbth_certificate_number: Optional[str] = None  # new
+    farm_tocli_number: Optional[str] = None        # new
     ppes: str
     submitted_at: Optional[datetime] = None
 
