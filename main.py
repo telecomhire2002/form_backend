@@ -59,7 +59,7 @@ async def get_collection() -> AsyncGenerator:
 # --- Models ---
 class Submission(BaseModel):
     email_primary: EmailStr
-    email_alt: Optional[EmailStr] = None   # new
+    email_alt: Optional[str] = None   # new
     circle: str = Field(..., min_length=1)
     state: str = Field(..., min_length=1)
     district: str = Field(..., min_length=1)
